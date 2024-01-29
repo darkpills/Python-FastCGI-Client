@@ -1,8 +1,5 @@
-#!/usr/bin/python
-
-import socket
 import random
-
+import socket
 
 class FastCGIClient:
     """A Fast-CGI Client for Python"""
@@ -63,44 +60,47 @@ class FastCGIClient:
 
     def __encodeFastCGIRecord(self, fcgi_type, content, requestid):
         length = len(content)
-        return chr(FastCGIClient.__FCGI_VERSION) \
-               + chr(fcgi_type) \
-               + chr((requestid >> 8) & 0xFF) \
-               + chr(requestid & 0xFF) \
-               + chr((length >> 8) & 0xFF) \
-               + chr(length & 0xFF) \
-               + chr(0) \
-               + chr(0) \
-               + content
+        response = bytearray()
+        response.append(FastCGIClient.__FCGI_VERSION)
+        response.append(fcgi_type)
+        response.append((requestid >> 8) & 0xFF)
+        response.append(requestid & 0xFF)
+        response.append((length >> 8) & 0xFF)
+        response.append(length & 0xFF)
+        response.append(0)
+        response.append(0)
+        response = response + content
+
+        return response 
 
     def __encodeNameValueParams(self, name, value):
         nLen = len(str(name))
         vLen = len(str(value))
-        record = ''
+        record = bytearray()
         if nLen < 128:
-            record += chr(nLen)
+            record.append(nLen)
         else:
-            record += chr((nLen >> 24) | 0x80) \
-                      + chr((nLen >> 16) & 0xFF) \
-                      + chr((nLen >> 8) & 0xFF) \
-                      + chr(nLen & 0xFF)
+            record.append((nLen >> 24) | 0x80)
+            record.append((nLen >> 16) & 0xFF)
+            record.append((nLen >> 8) & 0xFF)
+            record.append(nLen & 0xFF)
         if vLen < 128:
-            record += chr(vLen)
+            record.append(vLen)
         else:
-            record += chr((vLen >> 24) | 0x80) \
-                      + chr((vLen >> 16) & 0xFF) \
-                      + chr((vLen >> 8) & 0xFF) \
-                      + chr(vLen & 0xFF)
-        return record + str(name) + str(value)
+            record.append((vLen >> 24) | 0x80)
+            record.append((vLen >> 16) & 0xFF)
+            record.append((vLen >> 8) & 0xFF)
+            record.append(vLen & 0xFF)
+        return record + bytearray(str(name).encode('utf-8')) + bytearray(str(value).encode('utf-8'))
 
     def __decodeFastCGIHeader(self, stream):
         header = dict()
-        header['version'] = ord(stream[0])
-        header['type'] = ord(stream[1])
-        header['requestId'] = (ord(stream[2]) << 8) + ord(stream[3])
-        header['contentLength'] = (ord(stream[4]) << 8) + ord(stream[5])
-        header['paddingLength'] = ord(stream[6])
-        header['reserved'] = ord(stream[7])
+        header['version'] = stream[0]
+        header['type'] = stream[1]
+        header['requestId'] = int.from_bytes(stream[2:4], "big")
+        header['contentLength'] = int.from_bytes(stream[4:6], "big")
+        header['paddingLength'] = stream[6]
+        header['reserved'] = stream[7]
         return header
 
     def __decodeFastCGIRecord(self):
@@ -109,7 +109,7 @@ class FastCGIClient:
             return False
         else:
             record = self.__decodeFastCGIHeader(header)
-            record['content'] = ''
+            record['content'] = bytes()
             if 'contentLength' in record.keys():
                 contentLength = int(record['contentLength'])
                 buffer = self.sock.recv(contentLength)
@@ -127,30 +127,31 @@ class FastCGIClient:
 
         requestId = random.randint(1, (1 << 16) - 1)
         self.requests[requestId] = dict()
-        request = ""
-        beginFCGIRecordContent = chr(0) \
-                                 + chr(FastCGIClient.__FCGI_ROLE_RESPONDER) \
-                                 + chr(self.keepalive) \
-                                 + chr(0) * 5
+        request = bytearray()
+        beginFCGIRecordContent = bytearray()
+        beginFCGIRecordContent.append(0)
+        beginFCGIRecordContent.append(FastCGIClient.__FCGI_ROLE_RESPONDER)
+        beginFCGIRecordContent.append(self.keepalive)
+        beginFCGIRecordContent = beginFCGIRecordContent + bytes(5)
         request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_BEGIN,
                                               beginFCGIRecordContent, requestId)
-        paramsRecord = ''
+        paramsRecord = bytearray()
         if nameValuePairs:
-            for (name, value) in nameValuePairs.iteritems():
+            for (name, value) in nameValuePairs.items():
                 # paramsRecord = self.__encodeNameValueParams(name, value)
                 # request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_PARAMS, paramsRecord, requestId)
                 paramsRecord += self.__encodeNameValueParams(name, value)
 
-        if paramsRecord:
+        if len(paramsRecord) > 0:
             request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_PARAMS, paramsRecord, requestId)
-        request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_PARAMS, '', requestId)
+        request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_PARAMS, bytearray(), requestId)
 
         if post:
             request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_STDIN, post, requestId)
-        request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_STDIN, '', requestId)
+        request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_STDIN, bytearray(), requestId)
         self.sock.send(request)
         self.requests[requestId]['state'] = FastCGIClient.FCGI_STATE_SEND
-        self.requests[requestId]['response'] = ''
+        self.requests[requestId]['response'] = bytearray()
         return self.__waitForResponse(requestId)
 
     def __waitForResponse(self, requestId):
