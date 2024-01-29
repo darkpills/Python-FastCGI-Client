@@ -1,11 +1,9 @@
+# Python3 FastCGI Client
 
-Python FastCGI Client
+A `Python3` compatible FastCGI Client for directly access FastCGI web resource through `FastCGI`
 
-A `Python` FastCGI Client for directly access FastCGI web resource through `FastCGI`
-
-How use?(You should start your FastCGI Process)
-========================
-
+## Quickstart
+```
     from FastCGIClient import *
     client = FastCGIClient('127.0.0.1', 9000, 3000, 0)
 	params = dict()
@@ -30,5 +28,5 @@ How use?(You should start your FastCGI Process)
           'CONTENT_LENGTH': len(content)
           }
 	client.request(params, content)
-        
+```
 
