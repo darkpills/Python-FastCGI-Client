@@ -1,8 +1,14 @@
 import random
 import socket
+import logging
+import argparse
+import sys
+import os
 
+# from https://raw.githubusercontent.com/wuyunfeng/Python-FastCGI-Client/master/FastCGIClient.py
+# with code ported to Python3
 class FastCGIClient:
-    """A Fast-CGI Client for Python"""
+    """A Fast-CGI Client for Python3"""
 
     # private
     __FCGI_VERSION = 1
@@ -30,34 +36,30 @@ class FastCGIClient:
     FCGI_STATE_ERROR = 2
     FCGI_STATE_SUCCESS = 3
 
-    # colors
-    grey = "\x1b[90m"
-    yellow = "\x1b[33;20m"
-    red = "\x1b[31;20m"
-    reset = "\x1b[0m"
-    green = "\x1b[1;32m"
+    def __init__(self, target='127.0.0.1:9000', timeout=3000, keepalive=False):
 
-    def __init__(self, host, port, timeout, keepalive, verbose=False):
-        self.host = host
-        self.port = port
+        if target.lower().startswith('unix://'):
+            self.host = None
+            self.port = None
+            self.path = target[7:]
+        elif ':' in target:
+            hostSplit = target.split(':')
+            self.host = hostSplit[0]
+            self.port = hostSplit[1]
+            self.path = None
+        else:
+            self.host = target
+            self.port = '9000'
+            self.path = None
+        
         self.timeout = timeout
         if keepalive:
             self.keepalive = 1
         else:
             self.keepalive = 0
-        self.verbose = verbose
         self.sock = None
         self.requests = dict()
 
-    def info(self, message):
-        print(self.green + "[+] " + self.reset + message)
-
-    def error(self, message):
-        print(self.red + message + self.reset)
-
-    def debug(self, message):
-        if self.verbose:
-            print(self.grey + "[*] " + message + self.reset)
 
     def typeToString(self, type):
         if type == self.__FCGI_TYPE_BEGIN:
@@ -85,22 +87,43 @@ class FastCGIClient:
         else:
             raise Exception(f"Unknown message type: {type}")
 
-    def __connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    def connect(self):
+        if self.path != None:
+            logging.debug(f"Creating socket to {self.path}")
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        else:
+            logging.debug(f"Creating socket to {self.host}:{self.port}")
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.settimeout(self.timeout)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # if self.keepalive:
-        #     self.sock.setsockopt(socket.SOL_SOCKET, socket.SOL_KEEPALIVE, 1)
-        # else:
-        #     self.sock.setsockopt(socket.SOL_SOCKET, socket.SOL_KEEPALIVE, 0)
+
         try:
-            self.sock.connect((self.host, int(self.port)))
+            if self.path != None:
+                self.sock.connect(self.path)
+            else:
+                self.sock.connect((self.host, int(self.port)))
         except socket.error as msg:
-            self.sock.close()
+            self.close()
             self.sock = None
-            self.error(repr(msg))
+            logging.error(repr(msg))
             return False
         return True
+    
+    def close(self):
+        if self.sock:
+            logging.debug(f"Closing socket")
+            self.sock.close()
+            self.sock = None
+
+    def recv(self, size):
+        data = False
+        try:
+            data = self.sock.recv(size)
+        except socket.error as msg:
+            self.close()
+            logging.error(f"Unexpected socket error while expecting to receive {size} bytes:")
+            logging.error(repr(msg))
+        return data
 
     def __encodeFastCGIRecord(self, fcgi_type, content, requestid):
         length = len(content)
@@ -113,7 +136,15 @@ class FastCGIClient:
         response.append(length & 0xFF)
         response.append(0)
         response.append(0)
-        response = response + content
+
+        if type(content) is bytearray or type(content) is bytes:
+            encodedContent = content
+        elif type(content) is str:
+            encodedContent = content.encode('utf-8')
+        else:
+            raise Exception("Cannot encode the following content into fastcgi record: {content}")
+
+        response = response + encodedContent
 
         return response 
 
@@ -135,7 +166,7 @@ class FastCGIClient:
             record.append((vLen >> 16) & 0xFF)
             record.append((vLen >> 8) & 0xFF)
             record.append(vLen & 0xFF)
-        return record + bytearray(str(name).encode('utf-8')) + bytearray(str(value).encode('utf-8'))
+        return record + bytearray(str(name).encode('ascii')) + bytearray(str(value).encode('ascii'))
 
     def __decodeFastCGIHeader(self, stream):
         header = dict()
@@ -148,33 +179,35 @@ class FastCGIClient:
         return header
 
     def __decodeFastCGIRecord(self):
-        header = self.sock.recv(int(self.__FCGI_HEADER_SIZE))
+        header = self.recv(int(self.__FCGI_HEADER_SIZE))
         if not header:
-            self.debug(f"Received empty response")
+            logging.debug(f"Received empty response")
             return False
         
         record = self.__decodeFastCGIHeader(header)
         requestId = record['requestId'] 
-        self.debug(f"[{requestId}] Received header message type {self.typeToString(record['type'])}")
+        logging.debug(f"[{requestId}] Received header message type {self.typeToString(record['type'])}")
         record['content'] = bytes()
         if 'contentLength' in record.keys():
             totalContentLength = int(record['contentLength'])
             contentLength = 0
             while contentLength < totalContentLength:
-                buffer = self.sock.recv(totalContentLength - contentLength)
+                buffer = self.recv(totalContentLength - contentLength)
                 contentLength += len(buffer)
-                self.debug(f"[{requestId}] Received content {contentLength} / {totalContentLength} bytes")
+                logging.debug(f"[{requestId}] Received content {contentLength} / {totalContentLength} bytes")
                 if buffer:
                     record['content'] += buffer
+                if len(buffer) == 0:
+                    break
         if 'paddingLength' in record.keys():
-            self.debug(f"[{requestId}] Skipping padding content {record['paddingLength']} bytes")
-            skiped = self.sock.recv(int(record['paddingLength']))
+            logging.debug(f"[{requestId}] Skipping padding content {record['paddingLength']} bytes")
+            skiped = self.recv(int(record['paddingLength']))
         return record
 
     def request(self, nameValuePairs={}, post=''):
-        if not self.__connect():
-            self.error('Connect failure: please check fast cgi host and port')
-            return
+        if self.sock == None and not self.connect():
+            logging.error('Connect failure: please check fastcgi connexion parameters')
+            return None
 
         requestId = random.randint(1, (1 << 16) - 1)
         while requestId in self.requests:
@@ -188,39 +221,37 @@ class FastCGIClient:
         beginFCGIRecordContent = beginFCGIRecordContent + bytes(5)
         request += self.__encodeFastCGIRecord(FastCGIClient.__FCGI_TYPE_BEGIN,
                                               beginFCGIRecordContent, requestId)
-        filename = ''
+        
         paramsRecord = bytearray()
         if nameValuePairs:
             for (name, value) in nameValuePairs.items():
-                # paramsRecord = self.__encodeNameValueParams(name, value)
-                # request += self.__encodeFastCGIRecord(self.__FCGI_TYPE_PARAMS, paramsRecord, requestId)
+                logging.debug(f"Request param: {name}={value}")
                 paramsRecord += self.__encodeNameValueParams(name, value)
-                if name == 'SCRIPT_FILENAME':
-                    filename = value
 
         if len(paramsRecord) > 0:
             request += self.__encodeFastCGIRecord(self.__FCGI_TYPE_PARAMS, paramsRecord, requestId)
         request += self.__encodeFastCGIRecord(self.__FCGI_TYPE_PARAMS, bytearray(), requestId)
 
         if post:
+            logging.debug(f"Request STDIN: {post}")
             request += self.__encodeFastCGIRecord(self.__FCGI_TYPE_STDIN, post, requestId)
         request += self.__encodeFastCGIRecord(self.__FCGI_TYPE_STDIN, bytearray(), requestId)
-        self.debug(f"[{requestId}] {self.host}:{self.port}{filename}")
+        logging.debug(f"[{requestId}] Sending request")
         self.sock.send(request)
         self.requests[requestId]['state'] = self.FCGI_STATE_SEND
         self.requests[requestId]['response'] = bytearray()
-        return self.__waitForResponse(requestId)
+        return self.waitForResponse(requestId)
 
-    def __waitForResponse(self, requestId):
+    def waitForResponse(self, requestId):
         waitRequestIds = ','.join([str(x) for x in self.requests.keys()])
-        self.debug(f"[{waitRequestIds}] Waiting for response")
+        logging.debug(f"[{waitRequestIds}] Waiting for response")
         while True:
             response = self.__decodeFastCGIRecord()
             if not response:
                 break
 
             if requestId != int(response['requestId']):
-                self.debug(f"[{response['requestId']}] Skipping content for this request id...")
+                logging.debug(f"[{response['requestId']}] Skipping content for this request id...")
                 continue
             if response['type'] == self.__FCGI_TYPE_STDOUT:
                 self.requests[requestId]['response'] += response['content']
@@ -232,10 +263,9 @@ class FastCGIClient:
                 if self.requests[requestId]['state'] != self.FCGI_STATE_ERROR:
                     self.requests[requestId]['state'] = self.FCGI_STATE_SUCCESS
         
-        self.sock.close()
-        reponse = self.requests[requestId]['response']
+        self.close()
+        response = self.requests[requestId]['response']
         del self.requests[requestId]
-        return reponse
 
-    def __repr__(self):
-        return "fastcgi connect host:{} port:{}".format(self.host, self.port)
+        logging.debug(f"[{requestId}] Raw response:\n{response}")
+        return response

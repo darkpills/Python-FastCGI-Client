@@ -1,6 +1,4 @@
 .idea/*
 .idea
-
-FastCGIClient.pyc
-
+**/__pycache__
 .DS_Store
